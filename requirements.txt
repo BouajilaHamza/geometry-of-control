@@ -1,0 +1,10 @@
+torch==2.5.1+cpu
+--index-url https://download.pytorch.org/whl/cpu
+
+transformers==4.57.3
+accelerate==1.12.0
+tokenizers==0.22.1
+huggingface_hub==0.36.0
+safetensors==0.7.0
+regex==2025.11.3
+tqdm==4.67.1
