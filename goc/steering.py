@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 import torch
 from transformers import LogitsProcessor
 
+from goc.manifold_ops import ds_mix_steer
+
 
 # --------------------------------------------------------------------------- #
 # Model plumbing
@@ -258,6 +260,91 @@ def timed_generate(model, tokenizer, rendered_prompt: str, *, gen_kwargs: dict) 
     gen_tokens = int(max(0, out_ids.shape[-1] - in_len))
     text = tokenizer.decode(out_ids[in_len:], skip_special_tokens=True)
     return text, float(elapsed), gen_tokens
+
+
+# --------------------------------------------------------------------------- #
+# Unified arm-based residual intervention (the experiment's independent var)
+# --------------------------------------------------------------------------- #
+ARMS = ("none", "add", "renorm", "caa", "ds_mix")
+
+
+class ArmSteer:
+    """
+    One residual-stream intervention at `layer_idx`, dispatched by `arm`:
+
+      none    : no-op (control).
+      add     : h + alpha * v               (unconstrained activation addition).
+      renorm  : (h + alpha*v) rescaled to ||h||   (sphere projection).
+      caa     : add, but with a contrastive (difference-of-means) vector.
+      ds_mix  : inference-time mHC — Birkhoff-projected convex stream mix.
+
+    `v` is the unit steering direction (mean-of-one-sentence for add/renorm,
+    contrastive for caa; ds_mix uses whatever `v` is provided). Only the current
+    position is steered, leaving the KV cache intact.
+    """
+
+    def __init__(self, model, layer_idx: int, v: torch.Tensor, arm: str):
+        if arm not in ARMS:
+            raise ValueError(f"arm must be one of {ARMS}")
+        self.model = model
+        self.layer_idx = int(layer_idx)
+        self.v = v  # [1,1,d] unit
+        self.arm = arm
+        # arm knobs
+        self.alpha = 0.0                      # add / renorm / caa
+        self.alphas = (5.0, 10.0)             # ds_mix candidate streams
+        self.gate = 0.0                       # ds_mix control
+        self.ds_iters = 20
+        self._handle = None
+        self.hook_ms: list[float] = []
+        self.ds_matrix_error: list[float] = []
+
+    def _transform(self, h_last: torch.Tensor) -> torch.Tensor:
+        if self.arm == "none":
+            return h_last
+        if self.arm in ("add", "caa"):
+            return h_last + self.v * float(self.alpha)
+        if self.arm == "renorm":
+            n0 = h_last.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+            h1 = h_last + self.v * float(self.alpha)
+            return h1 * (n0 / h1.norm(dim=-1, keepdim=True).clamp_min(1e-8))
+        if self.arm == "ds_mix":
+            h_new, M = ds_mix_steer(h_last, self.v, self.alphas, self.gate, n_iters=self.ds_iters)
+            row = (M.sum(-1) - 1.0).abs().max().item()
+            col = (M.sum(-2) - 1.0).abs().max().item()
+            self.ds_matrix_error.append(float(max(row, col)))
+            return h_new
+        raise AssertionError(self.arm)
+
+    def enable(self):
+        if self._handle is not None:
+            return
+        layer = get_layer_module(self.model, self.layer_idx)
+
+        def hook(_m, _inp, out):
+            if self.arm == "none":
+                return out
+            t0 = time.perf_counter()
+            hs, is_tuple = (out[0], True) if isinstance(out, tuple) else (out, False)
+            hs2 = hs.clone()
+            hs2[:, -1:, :] = self._transform(hs2[:, -1:, :])
+            self.hook_ms.append((time.perf_counter() - t0) * 1000.0)
+            return (hs2,) + out[1:] if is_tuple else hs2
+
+        self._handle = layer.register_forward_hook(hook)
+
+    def disable(self):
+        if self._handle is not None:
+            self._handle.remove()
+            self._handle = None
+
+
+def capture_all_layer_hidden(model, tokenizer, text: str) -> list[torch.Tensor]:
+    """Hidden states at every layer for `text` (for manifold metrics)."""
+    inputs = tokenizer(text, return_tensors="pt").to(model.device)
+    with torch.no_grad():
+        out = model(**inputs, output_hidden_states=True)
+    return [h.detach() for h in out.hidden_states]  # tuple len = n_layers+1
 
 
 @dataclass
