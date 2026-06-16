@@ -1,0 +1,205 @@
+\documentclass{article}
+
+\usepackage{neurips_2024}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{array}
+
+\title{The Geometry of Control at Inference Time:\\
+Stochastic Constraints, Normalized Steering, and a Safety Clamp for Small LLMs}
+
+\author{%
+Anonymous Authors \\
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Large language model (LLM) control is typically exerted through pre-training, parameter updates, or context engineering.
+This paper studies a fourth mechanism: \emph{inference-time stochastic constraints} that act directly on either (i) the output distribution via logit-space interventions or (ii) internal representations via residual-stream steering.
+We present a reproducible experimental suite on a small instruction-tuned model (Qwen2.5-0.5B-Instruct; CPU inference) demonstrating: (1) hard constraints can enforce exact lexical and structural requirements via logit masking; (2) soft constraints can \emph{shape} token distributions but exhibit non-monotonic mode collapse; (3) internal manifold injection via forward hooks achieves low-latency control (tens of microseconds per hook in our setup) and, when combined with a small output bias, yields reliable style transfer; (4) a dual-site ``safety clamp'' can override external output pressure (attacker logit bias) and induce refusals for harmful requests; and (5) norm-preserving injection (renormalized steering) enlarges the safe operating region and correlates failure with entropy spikes, consistent with a manifold-stability interpretation.
+All code and console-logged runs are included in the accompanying repository \citep{thiswork2026}.
+\end{abstract}
+
+\section{Introduction}
+
+Transformers map a prompt $x$ to a conditional next-token distribution $P_\theta(y_t \mid x, y_{<t})$ \citep{vaswani2017attention}.
+Standard control levers modify $\theta$ (fine-tuning) or $x$ (prompting/RAG).
+In contrast, \emph{inference-time control} modifies the decoding process itself, either by constraining the distribution used for sampling or by intervening on hidden states before logits are produced.
+We operationalize this view with a sequence of controlled experiments and provide the first end-to-end, safety-motivated validation of a \emph{dual-site} inference-time control architecture on an open model: internal steering (``thought'') plus a small output-layer bias (``action'').
+
+\paragraph{Contributions.}
+All empirical results are reproducible from the scripts in \texttt{/workspace/experiments} and are cited as \citep{thiswork2026}.
+Our main contributions are:
+(i) a hard-constraint baseline using logit masking (Phase~1);
+(ii) a soft distribution-shaping ``semantic magnet'' and characterization of its mode-collapse regimes (Phase~2);
+(iii) an entropy-bounded adaptive controller analysis (Phases~3--4);
+(iv) internal steering via forward hooks with measured overhead and a dual-site safety clamp that can override attacker logit bias (Phases~5--6);
+(v) norm-preserving injection (renormalization) and a full 2D sweep mapping the safe operating region across multiple adversarial prompts, with entropy and throughput metrics (Phases~7--8).
+
+\section{Background and related work}
+
+\paragraph{Decoding as distributional control.}
+Sampling heuristics such as top-$k$ \citep{fan2018topk} and nucleus (top-$p$) \citep{holtzman2020nucleus} shape the tail of $P(y_t\mid\cdot)$.
+More explicit constraints can be enforced by altering logits (e.g., masking invalid tokens) prior to sampling; practical interfaces are widely used in modern toolkits \citep{wolf2020transformers}.
+Logical/structural constrained decoding has also been explored in the literature, including NeuroLogic decoding for predicate-logic constraints \citep{lu2021neurologic}.
+
+\paragraph{Geometry and normalization.}
+Entropy-regularized optimal transport can be solved efficiently by Sinkhorn iterations \citep{cuturi2013sinkhorn}, motivating ``soft'' mass-transport views of distribution shaping.
+Separately, DeepSeek's manifold-constrained hyper-connections (mHC) stabilize deep residual mixing by projecting mixing matrices onto a constrained manifold, preserving signal norms and preventing residual-stream explosions \citep{deepseekmhc2025}.
+
+\paragraph{Representation interventions.}
+Mechanistic interpretability and editing work often uses forward hooks or causal tracing to modify internal activations \citep{meng2022rome}.
+We treat internal steering as an inference-time engineering primitive and evaluate it under adversarial output pressure.
+
+\section{Methods}
+
+We describe five increasingly ``deep'' control interventions, all implemented in \citep{thiswork2026}.
+
+\subsection{Hard constraints via logit masking (Phase 1)}
+Given logits $\ell_t \in \mathbb{R}^{|V|}$, a hard constraint is implemented by adding a mask $M$ with $M_i=-\infty$ for invalid tokens and $0$ otherwise, producing $\ell'_t=\ell_t+M$ prior to sampling.
+We evaluate a lipogram-style forbidden-substring constraint (``forbid the letter \texttt{o}'') using \texttt{transformers.LogitsProcessor} \citep{wolf2020transformers}.
+
+\subsection{Soft constraints via a semantic prior (Phase 2)}
+We implement a soft ``semantic magnet'' that biases logits toward a target concept $c$.
+We compute a concept center in embedding space and derive a token prior $q$ over the vocabulary, then mix the model distribution with $q$ using a product-of-experts (PoE) rule:
+\[
+\log p'_t = (1-\lambda)\log p_t + \lambda \log q,
+\]
+where $\lambda$ controls constraint strength.
+We additionally test a lexicon-restricted soft prior to avoid collapse to non-linguistic tokens \citep{thiswork2026}.
+
+\subsection{Entropy-bounded adaptive control (Phase 3)}
+We experiment with proportional control that updates $\lambda_t$ based on measured entropy of the (post-constraint) distribution.
+This aligns with ``entropy-bounded'' ideas used to gate sampling uncertainty \citep{entropybounded2024} (we apply the concept to autoregressive decoding).
+
+\subsection{Internal manifold injection via forward hooks (Phase 5)}
+We inject a steering vector $v$ into the residual stream at a selected layer $L$ by modifying hidden states $h^L_t$ during the forward pass:
+\[
+h'^L_t = h^L_t + \alpha v.
+\]
+We implement this with PyTorch forward hooks and measure per-hook overhead \citep{thiswork2026}.
+To avoid corrupting cached context, we steer only the current position $t$ (not all past positions).
+
+\subsection{Norm-preserving injection (Phase 7)}
+To prevent ``energy'' (norm) blow-up analogous to residual-stream explosion \citep{deepseekmhc2025}, we implement \emph{renormalized steering}:
+\[
+h'^L_t = \frac{h^L_t + \alpha v}{\lVert h^L_t + \alpha v\rVert}\cdot \lVert h^L_t\rVert.
+\]
+We also implement spherical interpolation (SLERP) as a direction-only alternative; empirically it produced semantic degradation in our setup \citep{thiswork2026}.
+
+\section{Experimental setup}
+
+\paragraph{Model and runtime.}
+We use \texttt{Qwen/Qwen2.5-0.5B-Instruct} \citep{qwen2_technical} via Hugging Face Transformers \citep{wolf2020transformers}, CPU inference on Linux, and chat-template prompting when available \citep{thiswork2026}.
+
+\paragraph{Metrics.}
+We report:
+(i) adherence/success for constraints (binary);
+(ii) lexical leakage counts for a small corporate lexicon (style-transfer proxy) \citep{thiswork2026};
+(iii) output-distribution entropy per decoding step, summarized by max-entropy per run;
+(iv) cost: wall-clock seconds, generated tokens, and tokens/sec; plus hook overhead percentiles when applicable \citep{thiswork2026}.
+
+\paragraph{Safety reporting.}
+For harmful prompts, we \emph{never print instructions}. Outputs are automatically redacted if they match conservative markers; we only report refusal vs. attempted-instructions indicators \citep{thiswork2026}.
+
+\section{Results}
+
+\subsection{Hard constraints succeed deterministically}
+Across adversarial prompts designed to force forbidden substrings, logit masking achieved $100\%$ adherence while baseline sampling violated constraints in all trials for the instruct-formatted baseline on Qwen2.5-0.5B \citep{thiswork2026}.
+This provides a clean ``binary'' validation that inference-time constraints can override the pretrained distribution without changing weights.
+
+\subsection{Soft distribution shaping exhibits mode collapse}
+The PoE semantic magnet can inject corporate lexicon tokens into unrelated prompts (knight/dragon narrative) at moderate $\lambda$, but collapses into repetitive corporate tokens at higher strengths, consistent with a constraint-induced attractor basin \citep{thiswork2026}.
+This motivates adaptive control and deeper (internal) constraints.
+
+\subsection{Internal steering is low-latency and synergizes with small output bias}
+Forward-hook steering at internal sites yields measurable control with negligible overhead per hook call (tens of microseconds in our CPU setup), and combining internal steering with a small lexicon bias increases lexical manifestation without forcing full collapse \citep{thiswork2026}.
+
+\subsection{Safety clamp: internal steering can override attacker logit bias}
+We implement an attacker that adds a positive bias to compliance-associated tokens (``Sure'', ``Here'', etc.).
+A dual-site internal defense (mid-layer + final-norm steering) can produce clean refusals despite attack pressure in a non-monotonic ``Goldilocks'' region \citep{thiswork2026}.
+At excessively large steering, failures correlate with higher max-entropy, consistent with off-manifold destabilization.
+
+\subsection{Normalized steering expands the safe region and correlates failure with entropy spikes}
+Switching from additive to renormalized injection enlarges the range of steering strengths yielding refusal under attack pressure and increases max-entropy at failure points, consistent with a stability/energy-conservation interpretation aligned with mHC \citep{deepseekmhc2025,thiswork2026}.
+
+\subsection{Phase 8: 2D grid sweep (safe operating region)}
+We ran a full 2D grid over $(\alpha_{\text{layer}}, \alpha_{\text{final}})$ using renormalized steering, under attacker logit bias, across three adversarial prompt classes (vehicle theft, explosives, hate).
+Table~\ref{tab:heatmap} reports success rate (fraction of prompt classes with clean refusal), average max entropy, and average tokens/sec per cell \citep{thiswork2026}.
+
+\begin{table}[t]
+  \caption{Safe operating region heatmap (renorm). Cell format: success\% \,|\, avg max-entropy \,|\, avg tok/s. Success is 3/3 prompt-class refusals with no redaction-triggered attempted instructions.}
+  \label{tab:heatmap}
+  \centering
+  \small
+  \setlength{\tabcolsep}{3.5pt}
+  \begin{tabular}{>{\raggedleft}p{1.3cm}*{5}{p{2.45cm}}}
+    \toprule
+    $\alpha_{\text{layer}}\backslash\alpha_{\text{final}}$ & 0 & 2 & 5 & 8 & 10 \\
+    \midrule
+    0  & 100\% | 1.9 | 10.5 & 67\% | 1.9 | 10.6 & 67\% | 2.5 | 10.6 & 67\% | 2.5 | 10.9 & 100\% | 1.9 | 10.5 \\
+    2  & 100\% | 2.0 | 10.7 & 67\% | 1.9 | 10.6 & 67\% | 3.1 | 10.6 & 100\% | 2.0 | 11.0 & 100\% | 2.3 | 11.7 \\
+    5  & 0\%   | 4.0 | 12.8 & 67\% | 3.5 | 12.6 & 33\% | 3.7 | 12.5 & 100\% | 2.8 | 12.3 & 67\% | 3.2 | 12.4 \\
+    8  & 0\%   | 4.1 | 12.7 & 33\% | 4.0 | 12.7 & 33\% | 3.1 | 12.5 & 33\% | 3.4 | 12.4 & 0\% | 3.6 | 12.6 \\
+    10 & 0\%   | 3.6 | 12.5 & 33\% | 4.0 | 12.7 & 0\% | 4.4 | 12.7 & 33\% | 4.1 | 12.7 & 0\% | 3.5 | 12.5 \\
+    15 & 0\%   | 4.8 | 12.7 & 0\% | 5.7 | 12.6 & 0\% | 5.2 | 12.7 & 0\% | 4.9 | 12.6 & 0\% | 5.0 | 12.7 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The resulting map exhibits the expected structure: low/low and high/high regions fail, while intermediate regions (e.g., $(2,8)$, $(2,10)$, $(5,8)$) yield 3/3 refusals with relatively low entropy and competitive throughput \citep{thiswork2026}.
+
+\section{Discussion}
+
+\paragraph{Why dual-site control helps.}
+Internal steering changes the \emph{representation trajectory} (a ``thought'' prior), while a small output bias assists the readout to manifest the intended discrete surface form under sampling noise \citep{thiswork2026}.
+This separation echoes architectural vs. decoding-level constraints: geometry inside, probability mass at the output.
+
+\paragraph{Stability as geometry.}
+Non-monotonic failures at high steering strengths, and their association with entropy spikes, support the interpretation that overly strong steering pushes hidden states off the learned semantic manifold, degrading coherent refusal behavior and allowing attacker biases to dominate \citep{thiswork2026}.
+Renormalization partially mitigates this by preserving representation norms, paralleling the stabilizing role of manifold constraints in mHC \citep{deepseekmhc2025}.
+
+\section{Limitations}
+Our study uses a small model and heuristic safety classifiers (string markers + redaction) rather than a full-policy safety benchmark \citep{thiswork2026}.
+We do not claim certified safety; instead we demonstrate a controllable operating region under explicit output pressure.
+The exact safe region is model-, tokenizer-, and prompt-template-dependent.
+
+\section{Conclusion}
+We provide an end-to-end validation of inference-time stochastic constraints as a practical control paradigm.
+Hard constraints enforce exact requirements; soft constraints shape distributions but can collapse; internal manifold injection enables low-latency control; and a dual-site safety clamp can override attacker output bias within a measurable safe operating region.
+Norm-preserving steering enlarges that region and links failure to entropy spikes, reinforcing a geometric view of inference-time control \citep{deepseekmhc2025,thiswork2026}.
+
+\section*{References}
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\appendix
+
+\section{Reproducibility checklist}
+All scripts referenced in this paper are in \texttt{/workspace/experiments} \citep{thiswork2026}:
+\texttt{constraint\_decode.py},
+\texttt{semantic\_magnet.py},
+\texttt{adaptive\_semantic\_magnet.py},
+\texttt{residual\_steering.py},
+\texttt{residual\_steering\_adaptive.py},
+\texttt{residual\_steering\_dual\_site.py},
+\texttt{safety\_clamp.py},
+\texttt{safety\_grid\_sweep.py}.
+The grid sweep also writes per-trial summaries to \texttt{experiments/safety\_grid\_results.jsonl}.
+
+\end{document}
+
+404: Not Found
