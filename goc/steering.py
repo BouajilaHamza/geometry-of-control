@@ -155,17 +155,30 @@ class JailbreakBias(LogitsProcessor):
 
 
 class EntropyLogger(LogitsProcessor):
+    """Per-row entropy capture. `entropies` is the legacy flat list (kept for
+    bs=1 callers); `entropies_per_row` is list[list[float]] indexed by batch row
+    so batched generation can attribute back to items."""
+
     def __init__(self):
         super().__init__()
         self.entropies: list[float] = []
+        self.entropies_per_row: list[list[float]] = []
 
     def clear(self):
         self.entropies.clear()
+        self.entropies_per_row.clear()
 
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
-        if scores.shape[0] == 1 and scores.numel() > 0:
-            probs = torch.softmax(scores[0].detach().float(), dim=-1).clamp_min(1e-12)
-            self.entropies.append(float(-(probs * probs.log()).sum().item()))
+        if scores.numel() == 0:
+            return scores
+        probs = torch.softmax(scores.detach().float(), dim=-1).clamp_min(1e-12)
+        ents = (-(probs * probs.log()).sum(dim=-1)).tolist()  # [B]
+        if not self.entropies_per_row:
+            self.entropies_per_row = [[] for _ in range(len(ents))]
+        for i, e in enumerate(ents):
+            self.entropies_per_row[i].append(float(e))
+        if len(ents) == 1:
+            self.entropies.append(float(ents[0]))
         return scores
 
 

@@ -79,6 +79,7 @@ class RunConfig:
     manifold_every_seed0: bool = True        # compute manifold metrics once (seed 0) per cell
     out_dir: str = "results"
     dtype: str = "auto"
+    batch_size: int = 1                      # >1 batches items inside a (arm,attack,seed) cell
 
 
 def mean_ci(xs: list[float], z: float = 1.96) -> tuple[float, float]:
@@ -115,6 +116,34 @@ def _generate(model, tokenizer, text: str, *, gen_kwargs) -> tuple[str, float, i
     return txt, elapsed, gen
 
 
+def _generate_batch(model, tokenizer, texts: list[str], *, gen_kwargs
+                    ) -> list[tuple[str, float, int]]:
+    """Batched generation. Returns one (text, per-row seconds, gen_toks) per input.
+
+    Requires `tokenizer.padding_side = "left"` and `tokenizer.pad_token_id` set
+    (configured in run_experiment).
+    """
+    if len(texts) == 1:
+        out_text, sec, n = _generate(model, tokenizer, texts[0], gen_kwargs=gen_kwargs)
+        return [(out_text, sec, n)]
+    enc = tokenizer(texts, return_tensors="pt", padding=True, truncation=False)
+    enc = {k: v.to(model.device) for k, v in enc.items()}
+    in_len_padded = int(enc["input_ids"].shape[-1])
+    t0 = time.perf_counter()
+    with torch.no_grad():
+        out = model.generate(**enc, **gen_kwargs)
+    elapsed = time.perf_counter() - t0
+    per_row_sec = elapsed / len(texts)
+    pad_id = tokenizer.pad_token_id
+    results = []
+    for i in range(out.shape[0]):
+        gen_ids = out[i, in_len_padded:]
+        n_real = int((gen_ids != pad_id).sum().item()) if pad_id is not None else int(gen_ids.numel())
+        txt = tokenizer.decode(gen_ids, skip_special_tokens=True)
+        results.append((txt, per_row_sec, n_real))
+    return results
+
+
 def _score(item: data.EvalItem, text: str) -> dict:
     refused = is_refusal(text)
     if item.kind == "harmful":
@@ -146,6 +175,12 @@ def run_experiment(cfg: RunConfig, *, model=None, tokenizer=None) -> dict:
     else:
         tok = tokenizer  # preloaded (used by the pipeline smoke test, no HF needed)
     model.eval()
+
+    # Batched generation requires left padding and a pad token.
+    if cfg.batch_size > 1 and hasattr(tok, "padding_side"):
+        tok.padding_side = "left"
+        if getattr(tok, "pad_token_id", None) is None and getattr(tok, "eos_token_id", None) is not None:
+            tok.pad_token_id = tok.eos_token_id
 
     L = max(1, int(num_layers(model) * cfg.layer_frac))
     print(f"[exp] {num_layers(model)} layers; steering at layer {L}", flush=True)
@@ -189,6 +224,7 @@ def run_experiment(cfg: RunConfig, *, model=None, tokenizer=None) -> dict:
             steer.gate = cfg.ds_gate
 
     n_trials = 0
+    bs = max(1, int(cfg.batch_size))
     for arm in cfg.arms:
         vname = arm_vector.get(arm, "essence")
         steer = ArmSteer(model, L, vecs[vname], arm)
@@ -198,44 +234,53 @@ def run_experiment(cfg: RunConfig, *, model=None, tokenizer=None) -> dict:
             lp_extra = attack.logits_processor(tok)
             for si, seed in enumerate(cfg.seeds):
                 set_seed(seed)
-                for item in items:
+                # Iterate items in batches.
+                for start in range(0, len(items), bs):
+                    batch = items[start:start + bs]
                     entlog.clear()
                     steer.hook_ms.clear()
                     steer.ds_matrix_error.clear()
-                    text_in = _build_prompt(tok, item.prompt, attack)
+                    texts_in = [_build_prompt(tok, it.prompt, attack) for it in batch]
                     procs = [entlog] + ([lp_extra] if lp_extra else [])
-                    out_text, sec, gen_toks = _generate(
-                        model, tok, text_in,
+                    outs = _generate_batch(
+                        model, tok, texts_in,
                         gen_kwargs={**gen_base, "logits_processor": LogitsProcessorList(procs)},
                     )
-                    score = _score(item, out_text)
+                    hook_ms_mean = statistics.mean(steer.hook_ms) if steer.hook_ms else None
+                    ds_err_max = max(steer.ds_matrix_error) if steer.ds_matrix_error else None
+                    per_row_ent = entlog.entropies_per_row or [[] for _ in batch]
 
-                    # Manifold metrics: once per cell (seed index 0) on harmful items.
-                    manifold = None
-                    if cfg.manifold_every_seed0 and si == 0 and item.kind == "harmful" and arm != "none":
-                        hs_steer = capture_all_layer_hidden(model, tok, text_in)
-                        steer.disable()
-                        hs_base = capture_all_layer_hidden(model, tok, text_in)
-                        steer.enable()
-                        m = manifold_trajectory(hs_steer, hs_base)
-                        manifold = {"max_norm_ratio": m["max_norm_ratio"],
-                                    "mean_cka": m["mean_cka"], "min_cosine": m["min_cosine"]}
+                    for i, item in enumerate(batch):
+                        out_text, sec, gen_toks = outs[i]
+                        score = _score(item, out_text)
 
-                    row = {
-                        "model": cfg.model_id, "arm": arm, "vector": vname,
-                        "attack": attack.kind, "attack_strength": attack.strength,
-                        "attack_template": attack.template if attack.kind == "template" else None,
-                        "seed": seed, "item": item.name, "kind": item.kind,
-                        **score,
-                        "max_entropy": max(entlog.entropies) if entlog.entropies else None,
-                        "tok_s": (gen_toks / sec) if sec > 0 else None,
-                        "hook_ms": statistics.mean(steer.hook_ms) if steer.hook_ms else None,
-                        "ds_matrix_error": (max(steer.ds_matrix_error) if steer.ds_matrix_error else None),
-                        "manifold": manifold,
-                    }
-                    with open(jsonl_path, "a", encoding="utf-8") as f:
-                        f.write(json.dumps(row) + "\n")
-                    n_trials += 1
+                        manifold = None
+                        if (cfg.manifold_every_seed0 and si == 0
+                                and item.kind == "harmful" and arm != "none"):
+                            hs_steer = capture_all_layer_hidden(model, tok, texts_in[i])
+                            steer.disable()
+                            hs_base = capture_all_layer_hidden(model, tok, texts_in[i])
+                            steer.enable()
+                            m = manifold_trajectory(hs_steer, hs_base)
+                            manifold = {"max_norm_ratio": m["max_norm_ratio"],
+                                        "mean_cka": m["mean_cka"], "min_cosine": m["min_cosine"]}
+
+                        ent_row = per_row_ent[i] if i < len(per_row_ent) else []
+                        row = {
+                            "model": cfg.model_id, "arm": arm, "vector": vname,
+                            "attack": attack.kind, "attack_strength": attack.strength,
+                            "attack_template": attack.template if attack.kind == "template" else None,
+                            "seed": seed, "item": item.name, "kind": item.kind,
+                            **score,
+                            "max_entropy": max(ent_row) if ent_row else None,
+                            "tok_s": (gen_toks / sec) if sec > 0 else None,
+                            "hook_ms": hook_ms_mean,
+                            "ds_matrix_error": ds_err_max,
+                            "manifold": manifold,
+                        }
+                        with open(jsonl_path, "a", encoding="utf-8") as f:
+                            f.write(json.dumps(row) + "\n")
+                        n_trials += 1
         steer.disable()
         print(f"[exp] arm={arm} done ({n_trials} trials so far)", flush=True)
 

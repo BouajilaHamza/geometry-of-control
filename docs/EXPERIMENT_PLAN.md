@@ -76,11 +76,44 @@ factorization the review demanded ("quantify the marginal value").
 ## How to run
 
 ```bash
-# CPU validation (here, no download):
-python -m tests.test_manifold_ops
-python -m tests.test_pipeline
+# Modal: TDD gate then full experiment
+modal run modal_app.py::run_tests                    # operator + pipeline tests on GPU image
+modal run modal_app.py --batch-size 8                # full grid: 5 arms × 4 attacks × 20 items × 5 seeds
+modal volume get geometry-of-control-results / ./results --force
+python -m goc.analysis results/Qwen__Qwen2.5-7B-Instruct__summary.json --md results/report.md
 
-# Real models on GPU (Modal):
-modal run modal_app.py --models "Qwen/Qwen2.5-0.5B-Instruct,Qwen/Qwen2.5-7B-Instruct" --seeds 5
-python -m goc.analysis results/Qwen__Qwen2.5-7B-Instruct__summary.json --md report.md
+# Collapse hunt (fixed ds_mix hull, sweep add α):
+modal run modal_app.py::alpha_sweep --alphas 8,16,32,64 --ds-alphas 4,8,12
+modal volume get geometry-of-control-results /alpha_sweep_fixed_hull ./results --force
+GOC_SWEEP_DIR=results/alpha_sweep_fixed_hull python scripts/collapse_map.py
 ```
+
+## First GPU result (2026-06-16, Qwen2.5-7B-Instruct, L=14/28, A10G, bs=8)
+
+**Full grid** (`results/report.md`): 5 arms × 4 attacks × 20 items × 5 seeds = 2500 trials.
+At α=8 the four steering arms are statistically indistinguishable on refusal
+(0.80–0.90 on weak attacks, 0.07–0.15 under prefix), and on overrefusal /
+utility the gaps overlap with 95% CIs. H1 norm-bound separation is not visible
+at α=8 because every arm stays near the manifold (CKA ≈ 1.00, cosine ≈ 0.99).
+
+**Collapse-hunt α sweep** (`results/alpha_sweep_fixed_hull/`, single seed): hold
+the `ds_mix` hull fixed at `ds_alphas = (4, 8, 12)`, sweep `add`/`renorm` α over
+{8, 16, 32, 64}. This is the test the original sweep missed (it scaled
+`ds_alphas` with α and so removed its own bound).
+
+| arm | norm-ratio α=8 → α=64 | utility on benign at α=64 |
+|---|---|---|
+| `add` | 1.05 → **1.75** (unbounded) | 0.83 → **0.67** (33 pp loss) |
+| `renorm` | 1.00 → 1.06 (sphere) | 0.83 → 1.00 (variable) |
+| `ds_mix` | 1.05 → **1.05** (capped) | 0.83 → **0.83** (held) |
+
+So H1 (stability) holds in the form: **the doubly-stochastic operator declares
+its envelope once via `ds_alphas` and is then invariant to operator
+miscalibration**. A user who cranks `α` looking for stronger safety pushes
+`add` off the manifold and into a 33 pp capability cliff on benign prompts;
+the same crank does nothing to `ds_mix` because the hull is constant. This
+turns "bounded steering" from a theoretical guarantee into a **robustness-to-
+hyperparameter-misuse** property — the publishable contribution.
+
+H2 (Pareto) and H3 (robustness under prefix attack) need more seeds + tighter
+CIs to call.
