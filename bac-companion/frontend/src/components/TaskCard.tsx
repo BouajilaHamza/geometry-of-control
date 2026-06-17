@@ -1,35 +1,59 @@
 import type { Task, TaskType } from '../api'
 import { useLang } from '../i18n'
-import { SubjectDot } from './ui'
 
-const typeStyle: Record<TaskType, string> = {
-  review: 'bg-brand-50 text-brand-700',
-  drill: 'bg-rose-50 text-rose-600',
-  new: 'bg-violet-50 text-violet-700',
+const typeConfig: Record<TaskType, { cls: string; label: (t: (k: string) => string) => string }> = {
+  review: {
+    cls: 'bg-brand-50 text-brand-700 border border-brand-100',
+    label: (t) => t('review'),
+  },
+  drill: {
+    cls: 'bg-rose-50 text-rose-600 border border-rose-100',
+    label: (t) => t('drill'),
+  },
+  new: {
+    cls: 'bg-violet-50 text-violet-700 border border-violet-100',
+    label: (t) => t('new'),
+  },
 }
 
 export default function TaskCard({ task, index }: { task: Task; index?: number }) {
   const { t, pick } = useLang()
-  const typeLabel = task.task_type === 'review' ? t('review') : task.task_type === 'drill' ? t('drill') : t('new')
+  const { cls, label } = typeConfig[task.task_type]
 
   return (
     <div
-      className="card flex items-center gap-3 p-3.5 animate-fade-up"
+      className="card flex items-stretch gap-0 overflow-hidden animate-fade-up"
       style={index !== undefined ? { animationDelay: `${index * 40}ms` } : undefined}
     >
-      <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl" style={{ backgroundColor: `${task.subject_color}15` }}>
-        {task.kind === 'memory' ? <CardsIcon color={task.subject_color} /> : <PenIcon color={task.subject_color} />}
+      {/* Left colour stripe */}
+      <div className="w-1 shrink-0" style={{ backgroundColor: task.subject_color }} />
+
+      {/* Icon */}
+      <div
+        className="flex w-12 shrink-0 items-center justify-center"
+        style={{ backgroundColor: `${task.subject_color}10` }}
+      >
+        {task.kind === 'memory' ? (
+          <CardsIcon color={task.subject_color} />
+        ) : (
+          <PenIcon color={task.subject_color} />
+        )}
       </div>
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-1.5">
-          <SubjectDot color={task.subject_color} />
-          <span className="truncate text-xs font-semibold text-ink-500">{task.subject_name_fr}</span>
-        </div>
-        <p className="truncate font-semibold leading-tight">{pick(task.concept_name_fr, task.concept_name_ar)}</p>
-        <p className="truncate text-xs text-ink-400">{task.chapter_name_fr}</p>
+
+      {/* Content */}
+      <div className="min-w-0 flex-1 py-3 pl-3 pr-2">
+        <p className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: task.subject_color }}>
+          {task.subject_name_fr}
+        </p>
+        <p className="font-bold leading-snug text-ink-900">
+          {pick(task.concept_name_fr, task.concept_name_ar)}
+        </p>
+        <p className="mt-0.5 text-xs text-ink-400">{task.chapter_name_fr}</p>
       </div>
-      <div className="flex shrink-0 flex-col items-end gap-1">
-        <span className={`chip ${typeStyle[task.task_type]}`}>{typeLabel}</span>
+
+      {/* Right: type + time */}
+      <div className="flex shrink-0 flex-col items-end justify-center gap-1.5 py-3 pr-3.5">
+        <span className={`chip text-[11px] ${cls}`}>{label(t)}</span>
         <span className="text-xs text-ink-400">~{task.est_minutes} {t('minutes')}</span>
       </div>
     </div>
@@ -39,14 +63,17 @@ export default function TaskCard({ task, index }: { task: Task; index?: number }
 function CardsIcon({ color }: { color: string }) {
   return (
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <rect x="3" y="5" width="13" height="16" rx="2" /><path d="M8 5V3h13v16h-2" />
+      <rect x="3" y="5" width="13" height="16" rx="2" />
+      <path d="M8 5V3h13v16h-2" />
     </svg>
   )
 }
+
 function PenIcon({ color }: { color: string }) {
   return (
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5Z" />
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5Z" />
     </svg>
   )
 }
