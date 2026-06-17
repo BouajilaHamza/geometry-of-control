@@ -126,6 +126,33 @@ def stream_affinity(
     return log_aff
 
 
+def ds_mix_anchors(
+    h: torch.Tensor,
+    anchors: torch.Tensor,
+    gate: float,
+    n_iters: int = 20,
+    temperature: float = 1.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """K-anchor mHC guard.
+
+    Args:
+        h:       [B, 1, d] current-position hidden state.
+        anchors: [K, d]    K precomputed in-domain hidden states.
+    Returns:
+        h_new: [B, 1, d] anchor row of the doubly-stochastic mix; constrained
+               to the convex hull of (current, anchors).
+        M:     [B, K+1, K+1] the doubly-stochastic mixing matrix.
+    """
+    B = h.shape[0]
+    K = anchors.shape[0]
+    a = anchors.to(dtype=h.dtype, device=h.device).unsqueeze(0).expand(B, K, -1)  # [B,K,d]
+    streams = torch.cat([h, a], dim=1)                                            # [B,K+1,d]
+    log_aff = stream_affinity(streams, gate, temperature)
+    M = sinkhorn_knopp(log_aff, n_iters=n_iters)
+    mixed = torch.matmul(M, streams)
+    return mixed[:, 0:1, :], M
+
+
 def ds_mix_steer(
     h: torch.Tensor,
     v: torch.Tensor,

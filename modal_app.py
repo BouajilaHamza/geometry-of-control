@@ -218,6 +218,80 @@ def main(
                       f"overref={rec['overrefusal_mean']:.2f} util={rec['utility_mean']:.2f}")
 
 
+@app.function(
+    image=image,
+    gpu=os.environ.get("GOC_GPU", "A10G"),
+    volumes={"/cache": hf_cache, "/results": results_vol},
+    secrets=_hf_secrets(),
+    timeout=60 * 60,
+)
+def safety_guard_eval(model_id: str, layer_frac: float, anchor_gate: float,
+                      max_new_tokens: int, seed: int,
+                      n_harmful: int, n_benign: int, n_utility: int) -> dict:
+    """Run the M1 (K-anchor mHC guard) vs incumbent guardrails (B0/B1/B2/B3)
+    on the joint eval set. Saves per-item logs + per-guard KPI summary."""
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    from goc.eval_guards import evaluate_all_guards
+    from goc.steering import num_layers
+
+    os.environ.setdefault("HF_HOME", "/cache/hf")
+    print(f"[guard_eval] loading {model_id} on cuda (bf16)", flush=True)
+    tok = AutoTokenizer.from_pretrained(model_id, use_fast=True)
+    if getattr(tok, "pad_token_id", None) is None and getattr(tok, "eos_token_id", None) is not None:
+        tok.pad_token_id = tok.eos_token_id
+    model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=torch.bfloat16).to("cuda")
+    model.eval()
+
+    L = max(1, int(num_layers(model) * layer_frac))
+    safe_id = model_id.replace("/", "__")
+    out_dir = f"/results/safety_guard/{safe_id}"
+    summary = evaluate_all_guards(
+        model, tok, layer=L,
+        n_harmful=n_harmful, n_benign=n_benign, n_utility=n_utility,
+        anchor_gate=anchor_gate, max_new_tokens=max_new_tokens, seed=seed,
+        out_dir=out_dir,
+    )
+    summary["model"] = model_id
+    results_vol.commit()
+    return summary
+
+
+@app.local_entrypoint()
+def safety_guards(
+    model: str = "Qwen/Qwen2.5-7B-Instruct",
+    layer_frac: float = 0.5,
+    anchor_gate: float = 3.0,
+    max_new_tokens: int = 64,
+    seed: int = 7,
+    n_harmful: int = 8,
+    n_benign: int = 6,
+    n_utility: int = 6,
+):
+    """Compare M1 (K-anchor mHC guard) against B0/B1/B2/B3 baselines on the
+    joint eval set. Prints a KPI table at the end."""
+    summary = safety_guard_eval.remote(
+        model, layer_frac, anchor_gate, max_new_tokens, seed,
+        n_harmful, n_benign, n_utility,
+    )
+    print("\n========== SAFETY GUARD KPI TABLE ==========")
+    print(f"model={summary.get('model')} | layer={summary['layer']} | "
+          f"K={n_harmful} anchors\n")
+    hdr = ("guard           | R↑   OR↓  U↑   lat_s p95_s  tok/s  post_ms  composite")
+    print(hdr); print("-" * len(hdr))
+    for name, rec in summary["guards"].items():
+        k = rec["kpi"]
+        fmt = lambda v, w=4: ("  -  " if v is None else f"{v:.2f}".rjust(w))
+        print(f"{name:15s} | {fmt(k['refusal_recall'])} "
+              f"{fmt(k['overrefusal_rate'])} {fmt(k['utility_acc'])} "
+              f"{fmt(k['latency_mean_s'], 5)} "
+              f"{fmt(k['latency_p95_s'], 5)} "
+              f"{fmt(k['throughput_tok_s'], 6)} "
+              f"{fmt(k['post_overhead_ms_mean'], 6)} "
+              f"{fmt(k['composite'])}")
+
+
 @app.local_entrypoint()
 def alpha_sweep(
     model: str = "Qwen/Qwen2.5-7B-Instruct",

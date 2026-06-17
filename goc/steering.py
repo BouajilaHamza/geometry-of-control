@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 import torch
 from transformers import LogitsProcessor
 
-from goc.manifold_ops import ds_mix_steer
+from goc.manifold_ops import ds_mix_anchors, ds_mix_steer
 
 
 # --------------------------------------------------------------------------- #
@@ -278,7 +278,7 @@ def timed_generate(model, tokenizer, rendered_prompt: str, *, gen_kwargs: dict) 
 # --------------------------------------------------------------------------- #
 # Unified arm-based residual intervention (the experiment's independent var)
 # --------------------------------------------------------------------------- #
-ARMS = ("none", "add", "renorm", "caa", "ds_mix")
+ARMS = ("none", "add", "renorm", "caa", "ds_mix", "anchor_mix")
 
 
 class ArmSteer:
@@ -296,17 +296,19 @@ class ArmSteer:
     position is steered, leaving the KV cache intact.
     """
 
-    def __init__(self, model, layer_idx: int, v: torch.Tensor, arm: str):
+    def __init__(self, model, layer_idx: int, v: torch.Tensor, arm: str,
+                 anchors: torch.Tensor | None = None):
         if arm not in ARMS:
             raise ValueError(f"arm must be one of {ARMS}")
         self.model = model
         self.layer_idx = int(layer_idx)
         self.v = v  # [1,1,d] unit
         self.arm = arm
+        self.anchors = anchors                # [K, d] for anchor_mix
         # arm knobs
         self.alpha = 0.0                      # add / renorm / caa
         self.alphas = (5.0, 10.0)             # ds_mix candidate streams
-        self.gate = 0.0                       # ds_mix control
+        self.gate = 0.0                       # ds_mix / anchor_mix control
         self.ds_iters = 20
         self._handle = None
         self.hook_ms: list[float] = []
@@ -323,6 +325,14 @@ class ArmSteer:
             return h1 * (n0 / h1.norm(dim=-1, keepdim=True).clamp_min(1e-8))
         if self.arm == "ds_mix":
             h_new, M = ds_mix_steer(h_last, self.v, self.alphas, self.gate, n_iters=self.ds_iters)
+            row = (M.sum(-1) - 1.0).abs().max().item()
+            col = (M.sum(-2) - 1.0).abs().max().item()
+            self.ds_matrix_error.append(float(max(row, col)))
+            return h_new
+        if self.arm == "anchor_mix":
+            if self.anchors is None:
+                raise ValueError("anchor_mix requires anchors to be set")
+            h_new, M = ds_mix_anchors(h_last, self.anchors, self.gate, n_iters=self.ds_iters)
             row = (M.sum(-1) - 1.0).abs().max().item()
             col = (M.sum(-2) - 1.0).abs().max().item()
             self.ds_matrix_error.append(float(max(row, col)))

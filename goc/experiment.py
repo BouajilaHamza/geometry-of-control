@@ -80,6 +80,8 @@ class RunConfig:
     out_dir: str = "results"
     dtype: str = "auto"
     batch_size: int = 1                      # >1 batches items inside a (arm,attack,seed) cell
+    anchor_gate: float = 3.0                 # gate for the K-anchor mHC guard
+    anchor_calibration_prompts: tuple[str, ...] = ()  # prompts used to build anchors (empty = use first n_harmful from data.HARMFUL)
 
 
 def mean_ci(xs: list[float], z: float = 1.96) -> tuple[float, float]:
@@ -216,18 +218,30 @@ def run_experiment(cfg: RunConfig, *, model=None, tokenizer=None) -> dict:
     # arm -> which vector it uses
     arm_vector = {"add": "essence", "renorm": "essence", "ds_mix": "essence", "caa": "contrastive"}
 
+    # K-anchor safety guard: build anchors once (mean over response tokens of
+    # canonical refusals on calibration prompts).
+    anchors_tensor = None
+    if "anchor_mix" in cfg.arms:
+        from goc.anchors import build_safety_anchors
+        calib = list(cfg.anchor_calibration_prompts) or [it.prompt for it in data.HARMFUL[:cfg.n_harmful]]
+        print(f"[exp] building K={len(calib)} safety anchors at layer {L}", flush=True)
+        anchors_tensor = build_safety_anchors(model, tok, calib, layer_idx=L)
+        print(f"[exp] anchors shape = {tuple(anchors_tensor.shape)}", flush=True)
+
     def arm_config(steer: ArmSteer):
         if steer.arm in ("add", "renorm", "caa"):
             steer.alpha = cfg.alpha
         elif steer.arm == "ds_mix":
             steer.alphas = cfg.ds_alphas
             steer.gate = cfg.ds_gate
+        elif steer.arm == "anchor_mix":
+            steer.gate = cfg.anchor_gate
 
     n_trials = 0
     bs = max(1, int(cfg.batch_size))
     for arm in cfg.arms:
         vname = arm_vector.get(arm, "essence")
-        steer = ArmSteer(model, L, vecs[vname], arm)
+        steer = ArmSteer(model, L, vecs[vname], arm, anchors=anchors_tensor)
         arm_config(steer)
         steer.enable()
         for attack in cfg.attacks:

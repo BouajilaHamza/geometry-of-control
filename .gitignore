@@ -206,6 +206,13 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-# experiment outputs
+# experiment outputs (whitelist small summary artifacts; keep raw trials ignored)
 results/
+!results/
+!results/**/
+!results/**/*.txt
+!results/**/*.md
+!results/**/*summary.json
+!results/**/guard_eval.json
+results/**/*.jsonl
 *.jsonl
