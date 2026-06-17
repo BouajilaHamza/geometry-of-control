@@ -1,3 +1,9 @@
+---
+layout: default
+title: I tried mHC at inference time. Here's why it doesn't work.
+description: A training-free port of DeepSeek's mHC as an inference-time steering and safety operator. The bound holds exactly. The bound buys nothing useful.
+---
+
 # I tried mHC at inference time. Here's why it doesn't work.
 
 **TL;DR:** DeepSeek's manifold-constrained hyper-connections (mHC) give you provable norm bounds for free at training time. The obvious next move — port the same Sinkhorn-Knopp projection to inference as a steering or safety operator — sounds great on paper. I built it, ran it on Qwen-2.5-7B on Modal for about $1.10 of GPU, and the result is a clean two-line finding: **the bound holds exactly as advertised, and the bound buys you nothing useful at inference.** This post is the honest write-up. The code, the α sweep, and the KPI tables are all in the repo.

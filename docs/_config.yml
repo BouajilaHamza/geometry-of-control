@@ -1,0 +1,18 @@
+title: Geometry of Control
+description: Inference-time control of LLMs via residual-stream geometry — what works, what doesn't, and why.
+theme: jekyll-theme-minimal
+author: BouajilaHamza
+url: https://bouajilahamza.github.io
+baseurl: /geometry-of-control
+markdown: kramdown
+kramdown:
+  syntax_highlighter: rouge
+plugins:
+  - jekyll-seo-tag
+defaults:
+  - scope:
+      path: ""
+    values:
+      layout: default
+exclude:
+  - EXPERIMENT_PLAN.md
