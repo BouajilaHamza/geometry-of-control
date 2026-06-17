@@ -5,7 +5,7 @@ Training-free implementation of DeepSeek's manifold-constrained hyper-connection
 residual-stream operator on instruction-tuned LLMs — and an honest empirical
 report on why bounded activations do not give you bounded behavior.
 
-**Read the post first:** [`docs/blog_post.md`](docs/blog_post.md) — the two-line
+**Read the post first:** [bouajilahamza.github.io/geometry-of-control](https://bouajilahamza.github.io/geometry-of-control/) — the two-line
 finding, the α sweep, and the KPI table for the K-anchor safety guard. The TL;DR
 is that the bound holds exactly and buys nothing useful at inference. The rest
 of the repo is the evidence.
@@ -32,7 +32,7 @@ scripts/
   collapse_map.py     renders the α-sweep collapse map from per-α summary JSONs
 
 docs/
-  blog_post.md        the write-up — read this first
+  index.md            the write-up (published at bouajilahamza.github.io/geometry-of-control)
   EXPERIMENT_PLAN.md  original design + reviewer-gap mapping
 
 results/              committed run artifacts (α sweeps, collapse maps, KPI tables)
@@ -61,7 +61,7 @@ tests/                operator property tests + end-to-end pipeline smoke test
 
 The mHC operator delivers its training-time guarantee at inference, and the
 guarantee does not translate to behavioral control. A system prompt wins.
-See [`docs/blog_post.md`](docs/blog_post.md) for the full post-mortem.
+See [the post](https://bouajilahamza.github.io/geometry-of-control/) for the full post-mortem.
 
 ## Run it
 
